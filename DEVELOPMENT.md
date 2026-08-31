@@ -1,151 +1,182 @@
-# 开发说明文档 · 小红书 AI 求职雷达
+# 小红书 AI 求职雷达 · 项目实施文档（唯一权威版）
 
-> 最后更新：2026-08-31 · 数据规模：220 条笔记（面经 129 / 攻略 66 / 招聘 24）
-> 在线看板：`https://<用户名>.github.io/Red_book_job_summary/`（需先开启 Pages，见「部署」）
+> 最后更新：2026-09-01 · 数据规模：322 条笔记（招聘 48 / 面经 157 / 攻略 105 / 无关 11 / 待分类 1）+ 181 条评论
+> 在线看板：https://tanvish-chen.github.io/Red_book_job_summary/
+> 项目 GitHub：https://github.com/Tanvish-Chen/Red_book_job_summary
+> 本文档是项目**唯一**的完整实施文档。根目录曾有一份旧版 `DEVELOPMENT.md`，已删除，勿再创建副本。
 
 ---
 
 ## 1. 项目是什么
 
-一个**三段式数据管线**：用 MediaCrawler 采集小红书公开笔记 → LLM+规则做结构化提取 → 生成零依赖静态看板网页，部署到 GitHub Pages。目标是持续追踪 AI 方向求职信息（校招岗位、面经真题、经验攻略）。
+一条三段式数据管线，目标是**系统化追踪 AI 方向求职信息**（企业招聘帖、面经真题、求职攻略），服务于临近毕业的求职季：
 
 ```
-┌─────────────────┐   ┌──────────────────┐   ┌─────────────────┐
-│  MediaCrawler    │   │  pipeline/       │   │  site/          │
-│  (采集器,上游库) │──>│  提取与构建脚本   │──>│  看板静态页      │
-│  data/xhs/jsonl  │   │  extracted.json  │   │  index.html     │
-└─────────────────┘   └──────────────────┘   └────────┬────────┘
-                                                       │ git push
-                                                       v
-                                             GitHub Pages 上线
+MediaCrawler（采集） → pipeline（规则预标 + 人工复核 + 构建） → site（零依赖静态看板） → GitHub Pages
 ```
 
-## 2. 目录结构（工作区 `D:\小红书爬取`）
+- **上游**：开源爬虫 MediaCrawler（本地魔改，见 §7），扫码登录后按关键词搜索小红书公开笔记，落盘 jsonl
+- **中游**：`auto_extract.py` 规则引擎预标 → 人工/LLM 复核 `extracted.json` → `build_site.py` 去重合并生成 `data.js`
+- **下游**：`site/index.html` 单文件看板（搜索/筛选/排序/时效标记/真题展开/原文链接），`git push` 即发布
+
+## 2. 目录结构
 
 ```
 D:\小红书爬取\
-├── MediaCrawler\              # 上游采集库（GitHub: NanmiCoder/MediaCrawler）
-│   ├── config\base_config.py  #   ★ 采集配置（关键词/条数/频率）——最常改
-│   ├── data\xhs\jsonl\        #   原始数据落盘处（按日期追加）
-│   ├── browser_data\          #   浏览器登录态缓存（删除=下次要重新扫码）
-│   └── media_platform\xhs\    #   ★ 已打本地补丁，升级上游时会丢（见 §5）
-├── pipeline\                  # 自研数据管线
-│   ├── extracted.json         #   ★ 结构化标注库（LLM 维护，note_id → 字段）
-│   ├── build_site.py          #   合并去重 → 生成 site/data.js
-│   └── auto_extract.py        #   规则预标注（分类/公司/城市/真题抽取）
-└── site\                      # ★ 独立 git 仓库（推 GitHub 的就是它）
-    ├── index.html             #   看板页（无外部依赖，双击可开）
-    ├── data.js                #   构建产物（window.XHS_DATA = {...}）
-    ├── README.md              #   使用简介
-    └── DEVELOPMENT.md         #   本文档
+├── MediaCrawler\                    # 上游爬虫（uv 虚拟环境，Python ≥3.11）
+│   ├── config\base_config.py        #   关键词/条数/间隔/登录方式等
+│   ├── media_platform\xhs\core.py   #   容错补丁（§7）
+│   ├── media_platform\xhs\login.py  #   扫码等待 3000 次（约 50 分钟）
+│   └── data\xhs\jsonl\*.jsonl       #   原始数据（追加式、按日期分文件）
+├── pipeline\
+│   ├── auto_extract.py              #   规则引擎（只处理新 note_id，不覆盖已复核条目）
+│   ├── build_site.py                #   去重合并 + 截止时间解析 → site/data.js
+│   └── extracted.json               #   结构化标注库（核心资产）
+└── site\                            # 独立 git 仓库 → GitHub Pages
+    ├── index.html                   #   看板应用（无构建步骤，改完刷新即生效）
+    ├── data.js                      #   构建产物（勿手改）
+    ├── README.md                    #   仓库简介（指向本文档）
+    └── DEVELOPMENT.md               #   本文档
 ```
 
-## 3. 日常操作：跑一轮采集
+## 3. 环境准备（一次性）
 
-### 3.1 配置（`MediaCrawler/config/base_config.py`）
-
-| 参数 | 当前值 | 说明 |
+| 项 | 要求 | 备注 |
 |---|---|---|
-| `KEYWORDS` | 逗号分隔 | 每轮要搜的词；一轮别超过 6-8 个 |
-| `CRAWLER_MAX_NOTES_COUNT` | 30 | 每个关键词抓多少条 |
-| `CRAWLER_MAX_SLEEP_SEC` | 6 | 请求间隔（秒）。**别低于 5**，见 §6 风控 |
-| `ENABLE_GET_COMMENTS` | False | 评论抓取开关；开启后请求数翻倍 |
-| `SAVE_DATA_OPTION` | jsonl | 保持 jsonl（管线依赖此格式） |
-| `CRAWLER_TYPE` | search | 可改 creator 爬指定博主全部笔记 |
+| Python | ≥3.11（MediaCrawler 的 uv 环境） | **所有脚本必须用 `uv run` 执行**；系统 Python 缺 openpyxl，会静默跳过 xlsx 旧数据（实测教训：220→217 条） |
+| Chrome | 任意现代版 | CDP 模式（`ENABLE_CDP_MODE=True`）复用本机 Chrome，反检测更好 |
+| 小红书账号 | 健康账号 1 个 | 被风控标记的账号会反复要求扫码，详见 §6 |
 
-### 3.2 执行
+关键配置（`MediaCrawler/config/base_config.py`）：
+
+| 配置 | 当前值 | 说明 |
+|---|---|---|
+| `KEYWORDS` | 招聘向 6 词 | 上一轮面试词已备份在注释里；每轮换主题 |
+| `CRAWLER_MAX_NOTES_COUNT` | **40** | 每词抓 2 页（20 条/页）。注意取整：设 30 实际只抓 1 页 20 条 |
+| `CRAWLER_MAX_SLEEP_SEC` | 6 | 每条详情间隔，风控安全线 |
+| `MAX_CONCURRENCY_NUM` | 1 | 并发 1，勿调高 |
+| `ENABLE_GET_COMMENTS` | False | 评论请求量减半的关键；需要时再开 |
+| `ENABLE_GET_MEIDAS` | False | 图片未下载（配图内容丢失，见 §8） |
+| `SAVE_DATA_OPTION` | jsonl | 追加式落盘 |
+| `SAVE_LOGIN_STATE` | True | 登录态持久化到 `browser_data/` |
+
+## 4. 日常更新流程（一轮约 1 小时）
+
+**⚠️ 时段纪律：只在你醒着且能看手机的时段跑采集。** 2026-08-31 深夜挂机跑，会话失效弹二维码无人扫，整晚零产出。登录失效无法自愈（必须人工扫码），本项目**不做**推送叫醒方案（用户明确拒绝），因此夜间无人值守必然失败。一轮采集仅 15-30 分钟，白天跑零成本。
+
+### 4.1 采集
 
 ```bash
-cd /d/小红书爬取/MediaCrawler
+cd MediaCrawler
 uv run main.py --platform xhs --lt qrcode --type search
 ```
 
-- 首次或登录态失效时会弹 Chrome 窗口等扫码（窗口保持约 1 小时，已改过源码）；
-- 登录态健康时全自动，无需人工。正常一轮 6 词 × 30 条 ≈ 25-35 分钟。
+- 登录态有效：直接开跑（日志出现 `Current search keyword`）
+- 弹出二维码：用小红书 App 扫码（窗口约 50 分钟）
+- 实测：6 词 × 2 页约 14 分钟，一轮新增约 100 条（关键词间有重复，属正常）
+- 数据落盘到 `data/xhs/jsonl/search_contents_<日期>.jsonl`
 
-### 3.3 采集后处理（一轮三步）
+**每轮采集后检查日志**：确认 6 个关键词都跑完、无 `461`/`请通过验证`/ERROR；出现 461 = 账号进惩罚期（§6）。
+
+### 4.2 规则预标
 
 ```bash
-cd /d/小红书爬取/MediaCrawler
+uv run python ../pipeline/auto_extract.py            # 增量，只为新笔记生成草稿（auto:true）
+uv run python ../pipeline/auto_extract.py --dry-run  # 只预览不落盘
+```
 
-# ① 规则预标注（只处理新 note_id，不覆盖已有标注）
-uv run python ../pipeline/auto_extract.py        # 加 --dry-run 只看不写
+规则能力：标题强信号判类、公司词典+外号映射（鹅厂→腾讯）、城市、`X月X日` 截止时间、编号列表抽真题。
+**实测准确率**：分类约 75%，公司字段会误匹配（如"卡士乳业"帖被标成小红书），截止时间会把"抽奖时间/发布时间"当成截止（如华为帖 9 月 4 日实为抽奖日）。所以草稿**必须复核**。
 
-# ② （LLM 复核）把 pending 与明显误分类的条目改对，
-#    或把 summary/questions 补充进 pipeline/extracted.json
+### 4.3 人工复核（质量的生命线）
 
-# ③ 重建看板并上线
+直接编辑 `pipeline/extracted.json`（key=note_id）。复核要点（血泪清单）：
+
+1. **分类边界**：
+   - "凉经/面经/面试记录/投递时间线" → `interview`（规则常因标题含"秋招"误判为 job）
+   - 企业官方招聘帖/内推帖 → `job`
+   - 攻略/科普/薪资盘点/工具推荐/心态贴 → `insight`
+   - 焦虑吐槽/提问/个人求职求助/学术招生 → `noise`
+2. **截止时间陷阱**：抽奖时间 ≠ 截止、发布日 ≠ 截止、"8.13 起投递"是开始不是截止。格式统一写 `X月X日`（构建脚本按此解析出日期做过期判断）；长期有效/无截止留空
+3. **公司字段**：内推帖的公司从正文判断，别信规则；`阿里巴巴`与`阿里`统一写`阿里`，`淘天`独立保留
+4. **关键信息入摘要**：内推码、投递邮箱、面向届别（27 届/28 届）；"招聘对象为 2028 届"这类届别不符的要写警示
+5. 复核完删掉该条目的 `"auto": true` 标记；完全无法判断的条目整条删除，看板会显示为"待分类"
+6. **批量复核时不要用空字段覆盖规则已抽好的真题列表**（实测教训：一次补丁抹掉 120+ 题，需重跑规则恢复）
+
+### 4.4 构建
+
+```bash
 uv run python ../pipeline/build_site.py
-cd ../site && git add data.js && git commit -m "数据更新" && git push
 ```
 
-## 4. extracted.json 数据契约
+预期输出示例：`原始数据：322 条笔记 / 181 条评论 … 招聘 48 | 面经 157 | 攻略 105`。
+检查：`待分类` 数量是否可接受；出现"有 N 条笔记待提取"提示说明有笔记没进 `extracted.json`。
 
-key 为小红书 note_id，value 字段：
+### 4.5 本地验证
 
-```jsonc
-{
-  "note_id_xxx": {
-    "category": "job",          // job | interview | insight | noise
-    "company": "字节跳动",       // 尽量标准名；外号映射见 auto_extract.py NICKNAMES
-    "positions": ["AI产品经理"],
-    "locations": ["北京"],
-    "deadline": "8.13起投递",    // 有截止/时间线才填
-    "direction": "AI产品",       // Agent/RAG/LLM/NLP/CV/AI产品/...
-    "summary": "一句话摘要",      // 40-80字，提取核心信息
-    "tags": ["2027届", "官方"],
-    "questions": ["面试题1", ...], // 面经类：逐条抽出真题
-    "auto": true                 // true=规则草稿，复核后可去掉
-  }
-}
+双击 `site/index.html`（或浏览器打开 `file:///D:/小红书爬取/site/index.html`）：
+核对五个统计卡片数字、招聘页签摘要、时效标记（⏰在招/即将截止/已过期删除线）、地点筛选、真题展开。**构建后浏览器会缓存 data.js，务必强制刷新**。
+
+### 4.6 发布
+
+```bash
+cd ../site && git add data.js index.html DEVELOPMENT.md && git commit -m "数据更新" && git push
 ```
 
-规则：`auto_extract.py` 永不覆盖已有条目；没有条目的 note_id 在页面上显示为「待分类」。noise 类默认在「全部」标签下隐藏。
+一两分钟后 Pages 生效。
 
-## 5. 本地补丁清单（升级 MediaCrawler 时需重打）
+## 5. 看板功能速览
 
-对上游 `media_platform/xhs/` 打过 3 处补丁，`git pull` 上游更新会冲突/丢失：
+- 五统计卡片 + 分类标签页（招聘/面经/攻略/待分类，无关默认隐藏、可搜索出来）
+- 全文搜索（标题/正文/摘要/公司/岗位/标签，可搜"内推码"）
+- 筛选：公司 / **地点** / 方向 / **时效**（在招/即将截止≤14天/已过期/未注明）
+- 排序：时间 / 热度
+- 面经卡片可展开真题列表；每卡片带小红书原文链接（投递前务必点原文核对）
 
-1. **core.py · get_comments**：包 try/except，单条评论失败跳过不炸整轮（DataFetchError/RetryError/KeyError）；
-2. **core.py · get_note_detail_async_task**：HTML 回退路径包 RetryError；
-3. **core.py · 三处 asyncio.gather**：`return_exceptions=True` + 结果循环跳过 BaseException 实例；
-4. **login.py · check_login_state**：扫码等待窗口 600 次→3000 次（约 12 分钟→1 小时）。
+时效逻辑：`build_site.py` 把 `X月X日` 解析为日期（年份取发布年，跨年自动+1），前端按当天计算状态。静态页状态随时间自动变化，无需重建。
 
-## 6. 风控经验（重要，血泪换来的）
+## 6. 风控与登录态（重要，省学费）
 
-- **账号级标记**：风控跟账号走，不跟 IP。被标记表现：登录成功但详情 API 100% 返回 461 验证码。解法只有静默 24h+ 或换号；
-- **触发条件**（我们踩过的）：短时间多轮搜索 + 登录态反复失效重登（一天内丢了 3 次登录态后触发）；
-- **安全参数**：间隔 ≥6 秒、每轮 ≤200 条、轮次间隔 ≥45 分钟、一轮关键词 ≤8 个；
-- **健康信号**：日志里 `CAPTCHA appeared` 计数。开局偶发 1-2 次可无视；连续出现应立即停（TaskStop），静默后再来；
-- 评论抓取是详情请求的 2 倍压力，面经数据主要在正文里，非必要不开。
+1. **账号级标记**：高频搜索+登录会把账号打进惩罚期（详情 API 全 461，搜索列表正常）。换账号立即恢复 → 标记在账号不在 IP
+2. **惩罚期处理**：立即停跑（继续只会加深标记），静默数小时~1 天；期间轻度正常使用有助恢复
+3. **健康节奏**（全程 0 验证码）：6 秒间隔、每词 2 页、6 个词/轮、轮间冷却 ≥45 分钟、关评论抓取
+4. **登录态**：健康账号会话可跨启动保留；**会话可能在任意时刻被服务端失效，失效=必须人工扫码，无自动恢复手段**。这就是"只在白天跑"纪律的根因
+5. 数据是增量落盘+按 note_id 去重的：中断**不丢已采数据**，补扫码重跑即可续上
 
-## 7. 部署（GitHub Pages）
+## 7. 对 MediaCrawler 的本地魔改（升级时重放）
 
-site/ 本身是独立 git 仓库，remote 已指向 `Tanvish-Chen/Red_book_job_summary`。
+| 文件 | 改动 | 原因 |
+|---|---|---|
+| `media_platform/xhs/core.py` | `get_comments` try/except 跳过；`get_note_by_id_from_html` 回退路径包 RetryError；4 处 `asyncio.gather` 加 `return_exceptions=True` 并过滤异常实例 | 单条笔记风控失败会炸掉整个进程 |
+| `media_platform/xhs/login.py` | 扫码等待 600→3000 次 | 原 10 分钟窗口太短 |
+| `config/base_config.py` | `CRAWLER_MAX_NOTES_COUNT` 30→40 | 30 实际只抓 1 页 |
 
-首次开通（浏览器操作，一次性）：
-1. 打开 `https://github.com/Tanvish-Chen/Red_book_job_summary` → **Settings** → **Pages**；
-2. Source 选 **Deploy from a branch**，Branch 选 `main` / `(root)` → **Save**；
-3. 等 1-2 分钟，访问 `https://tanvish-chen.github.io/Red_book_job_summary/`。
+上游 `git pull` 会冲突，以本地补丁为准。已知补丁副作用：会话中途失效时会"静默空转"完剩余关键词（容错换稳定的代价），所以每轮结束要看日志核对产出量。
 
-之后每次 `git push` 页面自动更新。本地预览直接双击 `site/index.html`（数据内嵌无跨域问题）。
+## 8. 已知问题与改进方向
 
-## 8. 后续开发建议（Roadmap）
-
-按性价比排序：
-
-1. **Cookie 登录免扫码**：浏览器 F12 → Application → Cookies → 复制 `web_session` 填入 `config/base_config.py` 的 `COOKIES`，`LOGIN_TYPE` 改 `cookie`。配合现有 1 小时扫码窗口，无人值守成功率大幅提高；
-2. **博主主页模式**：面经数据密度最高的博主（现有数据里nickname可统计）用 `CRAWLER_TYPE="creator"` 定向全量爬取，比关键词搜索精准；
-3. **面经聚合页**：把 129 条面经的 questions 按 direction 聚合去重，生成「按方向复习清单」——build_site.py 里已有全部原料，加一个 group-by 视图即可；
-4. **GitHub Actions 定时构建**：push 时自动跑 build_site.py 校验 data.js 与 extracted.json 一致性；
-5. **接入 xiaohongshu-mcp**（github.com/xpzouying/xiaohongshu-mcp）：临时查询场景（"最近谁在招 X"）走 MCP 实时查，不用跑全量采集。
-
-## 9. 常见问题
-
-| 症状 | 处置 |
+| 问题 | 改进 |
 |---|---|
-| 启动后一直等扫码 | 正常，1 小时窗口内任意时刻扫码即可；或按 §8.1 切 cookie 模式 |
-| 日志大量 `CAPTCHA appeared` | 立即停止本轮，账号静默 24h，期间勿高频使用 |
-| `uv run` 报 Python 版本错 | 依赖 `requires-python>=3.11`，uv 会自动下载，勿用系统 3.10 直跑 |
-| 页面数据没更新 | 检查是否忘了跑 build_site.py，或 git push 网络失败重试 |
-| xlsx 报 no module | 旧格式兼容警告可无视；jsonl 才是主数据源 |
+| 图片内容丢失（很多岗位详情/真题在配图） | 开 `ENABLE_GET_MEIDAS=True` + 多模态模型提取 |
+| 真题率约 27%（43/157） | 同上 + 复核时补录 |
+| 博主定向采集未用 | `CRAWLER_TYPE="creator"` + 填 `config/xhs_config.py` 的 `XHS_CREATOR_ID_LIST`（目前是上游示例链接） |
+| 181 条评论未展示 | 看板卡片展开评论区（评论常有内推码/补充题目） |
+| 分类复核仍是人工 | 接 LLM API 批量重标 `auto:true` 条目 |
+| 招聘帖截止时间覆盖率低（2/48） | 多数帖子本就不写截止（数据源特性），靠"未注明"筛选兜底 |
+| 部署手动 | GitHub Actions 监听 jsonl 自动构建（服务器扫码问题无解，采集仍须本地） |
+
+## 9. 快速参考
+
+```bash
+# 一轮完整更新（全部在 MediaCrawler 目录，全部用 uv）
+uv run main.py --platform xhs --lt qrcode --type search   # ① 采集（白天跑！可能需扫码）
+uv run python ../pipeline/auto_extract.py                 # ② 规则预标
+#   ③ 人工复核 ../pipeline/extracted.json（§4.3 清单）
+uv run python ../pipeline/build_site.py                   # ④ 构建
+#   ⑤ 双击 ../site/index.html 验证（强制刷新）
+cd ../site && git add . && git commit -m "数据更新" && git push   # ⑥ 发布
+```
+
+## 10. 免责声明
+
+数据采集自小红书公开笔记，仅供个人求职学习；分类与字段由规则+人工/LLM 辅助生成，可能有偏差，投递前务必点击「原文链接」核实。请遵守 MediaCrawler 的非商业学习许可（LICENSE）。

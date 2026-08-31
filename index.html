@@ -48,6 +48,9 @@
   .fields { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   .chip { font-size: 12.5px; background: #f2f3f5; border-radius: 6px; padding: 3px 9px; color: #444b54; }
   .chip.warn { background: #fff2e3; color: #b26a00; }
+  .chip.dl-open { background: #fff2e3; color: #b26a00; }
+  .chip.dl-soon { background: #ffe8e8; color: #d4380d; font-weight: 600; }
+  .chip.dl-expired { background: #f0f1f3; color: #9aa2ad; text-decoration: line-through; }
   .chip.company { background: #fdeef0; color: var(--job); font-weight: 600; }
   details.questions { margin-top: 10px; }
   details.questions summary { font-size: 13px; color: var(--interview); cursor: pointer; user-select: none; }
@@ -74,7 +77,15 @@
   <div class="toolbar">
     <input type="search" id="q" placeholder="搜索标题 / 正文 / 公司 / 岗位…">
     <select id="f-company"><option value="">全部公司</option></select>
+    <select id="f-location"><option value="">全部地点</option></select>
     <select id="f-direction"><option value="">全部方向</option></select>
+    <select id="f-status">
+      <option value="">时效不限</option>
+      <option value="open">在招（未截止）</option>
+      <option value="soon">即将截止（≤14天）</option>
+      <option value="expired">已过期</option>
+      <option value="none">未注明截止</option>
+    </select>
     <select id="f-sort">
       <option value="time">按时间排序</option>
       <option value="liked">按热度排序</option>
@@ -106,6 +117,14 @@ let curTab = "all";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+function deadlineStatus(n) {
+  if (!n.deadline_date) return "none";
+  const days = Math.ceil((new Date(n.deadline_date + "T23:59:59") - new Date()) / 86400000);
+  if (days < 0) return "expired";
+  if (days <= 14) return "soon";
+  return "open";
+}
+
 function init() {
   const s = DATA.stats || {};
   $("gen-at").textContent = s.generated_at || "—";
@@ -130,23 +149,29 @@ function init() {
   );
 
   const companies = [...new Set(DATA.notes.map((n) => n.company).filter(Boolean))].sort();
+  const locations = [...new Set(DATA.notes.flatMap((n) => n.locations || []))].sort();
   const directions = [...new Set(DATA.notes.map((n) => n.direction).filter(Boolean))].sort();
   $("f-company").innerHTML += companies.map((c) => `<option>${esc(c)}</option>`).join("");
+  $("f-location").innerHTML += locations.map((l) => `<option>${esc(l)}</option>`).join("");
   $("f-direction").innerHTML += directions.map((d) => `<option>${esc(d)}</option>`).join("");
 
-  ["q", "f-company", "f-direction", "f-sort"].forEach((id) => $(id).addEventListener("input", render));
+  ["q", "f-company", "f-location", "f-direction", "f-status", "f-sort"].forEach((id) => $(id).addEventListener("input", render));
   render();
 }
 
 function filtered() {
   const q = $("q").value.trim().toLowerCase();
   const co = $("f-company").value;
+  const loc = $("f-location").value;
   const dir = $("f-direction").value;
+  const st = $("f-status").value;
   let list = DATA.notes.filter((n) => {
     if (curTab === "pending" ? n.category !== "pending" : curTab !== "all" && n.category !== curTab) return false;
     if (curTab === "all" && n.category === "noise" && !q) return false;
     if (co && n.company !== co) return false;
+    if (loc && !(n.locations || []).includes(loc)) return false;
     if (dir && n.direction !== dir) return false;
+    if (st && deadlineStatus(n) !== st) return false;
     if (q) {
       const hay = [n.title, n.desc, n.summary, n.company, ...(n.positions || []), ...(n.tags || [])].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
@@ -165,7 +190,11 @@ function render() {
       n.company && `<span class="chip company">${esc(n.company)}</span>`,
       ...(n.positions || []).map((p) => `<span class="chip">${esc(p)}</span>`),
       ...(n.locations || []).map((l) => `<span class="chip">📍 ${esc(l)}</span>`),
-      n.deadline && `<span class="chip warn">⏰ ${esc(n.deadline)}</span>`,
+      n.deadline && (() => {
+        const st = deadlineStatus(n);
+        const suffix = st === "expired" ? "（已过期）" : st === "soon" ? "（即将截止）" : "";
+        return `<span class="chip dl-${st}">⏰ ${esc(n.deadline)}${suffix}</span>`;
+      })(),
       n.direction && `<span class="chip">${esc(n.direction)}</span>`,
       ...(n.tags || []).map((t) => `<span class="chip">#${esc(t)}</span>`),
     ].filter(Boolean).join("");
