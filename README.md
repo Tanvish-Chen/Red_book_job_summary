@@ -3,6 +3,8 @@
 追踪小红书上 AI 方向求职信息的静态数据看板：招聘信息、面试面经、经验攻略。
 纯静态页面，无任何依赖——双击 `index.html` 即可在本地打开，也可以直接部署到 GitHub Pages。
 
+**开发与运维文档见 [DEVELOPMENT.md](DEVELOPMENT.md)**（架构、采集操作流程、风控经验、Roadmap）。
+
 ![预览](https://img.shields.io/badge/数据源-MediaCrawler-red) ![依赖](https://img.shields.io/badge/依赖-零-green)
 
 ## 本地使用
