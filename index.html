@@ -173,7 +173,17 @@ function filtered() {
     if (dir && n.direction !== dir) return false;
     if (st && deadlineStatus(n) !== st) return false;
     if (q) {
-      const hay = [n.title, n.desc, n.summary, n.company, ...(n.positions || []), ...(n.tags || [])].join(" ").toLowerCase();
+      const hay = [
+        n.title,
+        n.desc,
+        n.summary,
+        n.company,
+        ...(n.positions || []),
+        ...(n.tags || []),
+        ...(n.questions || []),
+        ...(n.locations || []),
+        n.direction,
+      ].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;

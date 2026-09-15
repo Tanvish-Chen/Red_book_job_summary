@@ -1,6 +1,6 @@
 # 小红书 AI 求职雷达 · 项目实施文档（唯一权威版）
 
-> 最后更新：2026-09-01 · 数据规模：348 条笔记（招聘 52 / 面经 166 / 攻略 113 / 无关 16 / 待分类 1）+ 181 条评论
+> 最后更新：2026-09-15 · 数据规模：372 条笔记（招聘 40 / 面经 169 / 攻略 125 / 无关 38 / 待分类 0）+ 181 条评论
 > 在线看板：https://tanvish-chen.github.io/Red_book_job_summary/
 > 项目 GitHub：https://github.com/Tanvish-Chen/Red_book_job_summary
 > 本文档是项目**唯一**的完整实施文档。根目录曾有一份旧版 `DEVELOPMENT.md`，已删除，勿再创建副本。
